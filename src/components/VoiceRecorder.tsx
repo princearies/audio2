@@ -10,10 +10,11 @@ import {
   DEFAULT_BIT_DEPTH,
   DEFAULT_BIT_RATE,
   convertAudio,
+  encodeWAV,
   canShareFiles,
   shareFile,
 } from '../utils/audioConverter';
-import { autoTrimSilence, getSilenceRegions } from '../utils/vad';
+import { autoTrimSilence, getSilenceRegions, cutSilenceFromBuffer } from '../utils/vad';
 
 export default function VoiceRecorder() {
   const [isRecording, setIsRecording] = useState(false);
@@ -43,6 +44,9 @@ export default function VoiceRecorder() {
   // Audio quality settings
   const [bitDepth, setBitDepth] = useState<BitDepth>(DEFAULT_BIT_DEPTH);
   const [bitRate, setBitRate] = useState<BitRate>(DEFAULT_BIT_RATE);
+  
+  // Trim result message
+  const [trimResultMessage, setTrimResultMessage] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -285,36 +289,65 @@ export default function VoiceRecorder() {
     }
   }, [audioBlob, convertedBlob, format]);
 
-  // Auto-trim silence using VAD
+  // Auto-trim silence using VAD - actually cuts the silence
   const autoTrimSilenceHandler = useCallback(() => {
     if (!audioBuffer) return;
 
     setIsAutoTrimming(true);
     
     try {
-      // Detect silence regions
+      // Detect silence regions for visualization
       const regions = getSilenceRegions(audioBuffer, {
         silenceThreshold,
         minSilenceDuration: 0.3,
       });
       setSilenceRegions(regions);
 
-      // Auto-trim based on voice activity
-      const { startTrim, endTrim } = autoTrimSilence(audioBuffer, {
+      // Actually cut the silence from the audio buffer
+      const trimmedBuffer = cutSilenceFromBuffer(audioBuffer, {
         silenceThreshold,
         minSilenceDuration: 0.3,
       });
 
-      // Apply trim values
-      setTrimStart(startTrim);
-      setTrimEnd(endTrim);
+      // Update the audio buffer with trimmed version
+      setAudioBuffer(trimmedBuffer);
+      setDuration(trimmedBuffer.duration);
+      
+      // Reset trim values since we've already trimmed
+      setTrimStart(0);
+      setTrimEnd(1);
+
+      // Create new blob from trimmed buffer for download
+      const wavBlob = encodeWAV(trimmedBuffer, bitDepth);
+      setAudioBlob(wavBlob);
+      
+      // Update audio URL
+      if (audioUrl) {
+        URL.revokeObjectURL(audioUrl);
+      }
+      const newUrl = URL.createObjectURL(wavBlob);
+      setAudioUrl(newUrl);
+
+      // Show success message
+      const silenceRemoved = audioBuffer.duration - trimmedBuffer.duration;
+      if (silenceRemoved > 0) {
+        setError(null);
+        setTrimResultMessage(
+          `✓ Removed ${silenceRemoved.toFixed(2)}s of silence. New duration: ${trimmedBuffer.duration.toFixed(2)}s`
+        );
+        // Clear message after 5 seconds
+        setTimeout(() => setTrimResultMessage(null), 5000);
+      } else {
+        setTrimResultMessage('No silence detected to remove.');
+        setTimeout(() => setTrimResultMessage(null), 3000);
+      }
     } catch (err) {
       console.error('Auto-trim error:', err);
-      setError('Failed to detect silence. Try adjusting the threshold.');
+      setError('Failed to trim silence. Try adjusting the threshold.');
     } finally {
       setIsAutoTrimming(false);
     }
-  }, [audioBuffer, silenceThreshold]);
+  }, [audioBuffer, silenceThreshold, bitDepth, audioUrl]);
 
   // Reset recorder
   const resetRecorder = useCallback(() => {
@@ -333,6 +366,7 @@ export default function VoiceRecorder() {
     setTrimEnd(1);
     setError(null);
     setSilenceRegions([]);
+    setTrimResultMessage(null);
   }, [audioUrl, convertedUrl, stopAudio]);
 
   // Keyboard shortcuts
@@ -700,14 +734,14 @@ export default function VoiceRecorder() {
                     className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-red-500"
                   />
                   <p className="text-gray-500 text-xs mt-1">
-                    Lower = more sensitive (detects quieter sounds), Higher = less sensitive
+                    Lower = more sensitive (detects quieter sounds), Higher = less sensitive. This will permanently remove silence from your recording.
                   </p>
                 </div>
                 <button
                   onClick={autoTrimSilenceHandler}
                   disabled={isAutoTrimming}
                   className="w-full px-4 py-2.5 bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed text-white font-medium rounded-lg shadow-lg shadow-red-500/30 transition-all duration-200 hover:scale-105 active:scale-95 flex items-center justify-center gap-2 relative group"
-                  title="Auto-Trim Silence (A)"
+                  title="Cut silence from audio (A)"
                 >
                   {isAutoTrimming ? (
                     <>
@@ -715,14 +749,14 @@ export default function VoiceRecorder() {
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                       </svg>
-                      Detecting Silence...
+                      Cutting Silence...
                     </>
                   ) : (
                     <>
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z" />
                       </svg>
-                      Auto-Trim Silence
+                      Cut Silence Automatically
                       <kbd className="ml-2 px-1.5 py-0.5 bg-white/20 rounded text-xs">A</kbd>
                     </>
                   )}
@@ -731,6 +765,11 @@ export default function VoiceRecorder() {
                   <div className="text-gray-400 text-sm bg-gray-800/50 rounded-lg p-2">
                     <span className="text-green-400 font-medium">✓ Detected {silenceRegions.length} silence region{silenceRegions.length > 1 ? 's' : ''}</span>
                     <span className="text-gray-500"> • Red areas in waveform show detected silence</span>
+                  </div>
+                )}
+                {trimResultMessage && (
+                  <div className="text-sm bg-green-500/10 border border-green-500/30 rounded-lg p-2 text-green-400">
+                    {trimResultMessage}
                   </div>
                 )}
               </div>
