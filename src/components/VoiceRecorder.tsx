@@ -2,7 +2,13 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import WaveformVisualizer from './WaveformVisualizer';
 import {
   AudioFormat,
+  BitDepth,
+  BitRate,
   FORMAT_OPTIONS,
+  BIT_DEPTH_OPTIONS,
+  BIT_RATE_OPTIONS,
+  DEFAULT_BIT_DEPTH,
+  DEFAULT_BIT_RATE,
   convertAudio,
   canShareFiles,
   shareFile,
@@ -33,6 +39,10 @@ export default function VoiceRecorder() {
   const [silenceThreshold, setSilenceThreshold] = useState(0.02);
   const [silenceRegions, setSilenceRegions] = useState<Array<{ start: number; end: number }>>([]);
   const [isAutoTrimming, setIsAutoTrimming] = useState(false);
+  
+  // Audio quality settings
+  const [bitDepth, setBitDepth] = useState<BitDepth>(DEFAULT_BIT_DEPTH);
+  const [bitRate, setBitRate] = useState<BitRate>(DEFAULT_BIT_RATE);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -69,7 +79,7 @@ export default function VoiceRecorder() {
     const doConvert = async () => {
       setIsConverting(true);
       try {
-        const blob = await convertAudio(audioBuffer, format);
+        const blob = await convertAudio(audioBuffer, format, { bitDepth, bitRate });
         setConvertedBlob(blob);
         const url = URL.createObjectURL(blob);
         if (convertedUrl) URL.revokeObjectURL(convertedUrl);
@@ -82,7 +92,7 @@ export default function VoiceRecorder() {
     };
 
     doConvert();
-  }, [audioBuffer, format]);
+  }, [audioBuffer, format, bitDepth, bitRate]);
 
   // Start recording
   const startRecording = useCallback(async () => {
@@ -760,6 +770,67 @@ export default function VoiceRecorder() {
                 </div>
               )}
             </div>
+
+            {/* Bit Depth Selection (for WAV) */}
+            {(format === 'wav') && (
+              <div className="bg-gray-700/30 rounded-xl p-4">
+                <h3 className="text-white font-medium mb-3 flex items-center gap-2">
+                  <svg className="w-5 h-5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                  Bit Depth (Resolution)
+                </h3>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  {BIT_DEPTH_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setBitDepth(opt.value)}
+                      className={`px-4 py-2.5 rounded-lg font-medium text-sm transition-all duration-200 ${
+                        bitDepth === opt.value
+                          ? 'bg-gradient-to-r from-cyan-500 to-blue-500 text-white shadow-lg shadow-cyan-500/20'
+                          : 'bg-gray-600/50 text-gray-300 hover:bg-gray-600 hover:text-white'
+                      }`}
+                      title={opt.description}
+                    >
+                      <span className="block text-base font-bold">{opt.label}</span>
+                      <span className="block text-xs opacity-70">{opt.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Bit Rate Selection (for MP3/OGG) */}
+            {(format === 'mp3' || format === 'ogg') && (
+              <div className="bg-gray-700/30 rounded-xl p-4">
+                <h3 className="text-white font-medium mb-3 flex items-center gap-2">
+                  <svg className="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                  </svg>
+                  Bit Rate (Quality)
+                </h3>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                  {BIT_RATE_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setBitRate(opt.value)}
+                      className={`px-4 py-2.5 rounded-lg font-medium text-sm transition-all duration-200 ${
+                        bitRate === opt.value
+                          ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg shadow-orange-500/20'
+                          : 'bg-gray-600/50 text-gray-300 hover:bg-gray-600 hover:text-white'
+                      }`}
+                      title={opt.description}
+                    >
+                      <span className="block text-base font-bold">{opt.label}</span>
+                      <span className="block text-xs opacity-70">{opt.description}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-gray-500 text-xs mt-3">
+                  💡 Higher bit rate = better quality but larger file size
+                </p>
+              </div>
+            )}
 
             {/* Download & Share Buttons */}
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
