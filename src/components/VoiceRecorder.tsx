@@ -1,5 +1,12 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import WaveformVisualizer from './WaveformVisualizer';
+import {
+  AudioFormat,
+  FORMAT_OPTIONS,
+  convertAudio,
+  canShareFiles,
+  shareFile,
+} from '../utils/audioConverter';
 
 export default function VoiceRecorder() {
   const [isRecording, setIsRecording] = useState(false);
@@ -14,7 +21,12 @@ export default function VoiceRecorder() {
   const [trimEnd, setTrimEnd] = useState(1);
   const [isPaused, setIsPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [format, setFormat] = useState<'webm' | 'mp3' | 'wav'>('webm');
+  const [format, setFormat] = useState<AudioFormat>('mp3');
+  const [isConverting, setIsConverting] = useState(false);
+  const [isSharing, setIsSharing] = useState(false);
+  const [shareSupported, setShareSupported] = useState(false);
+  const [convertedBlob, setConvertedBlob] = useState<Blob | null>(null);
+  const [convertedUrl, setConvertedUrl] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -25,12 +37,46 @@ export default function VoiceRecorder() {
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const animationRef = useRef<number>(0);
 
+  // Check share support on mount
+  useEffect(() => {
+    setShareSupported(canShareFiles());
+  }, []);
+
   // Format time as mm:ss
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
+
+  // Convert audio to selected format whenever format or audioBuffer changes
+  useEffect(() => {
+    if (!audioBuffer) {
+      setConvertedBlob(null);
+      if (convertedUrl) {
+        URL.revokeObjectURL(convertedUrl);
+        setConvertedUrl(null);
+      }
+      return;
+    }
+
+    const doConvert = async () => {
+      setIsConverting(true);
+      try {
+        const blob = await convertAudio(audioBuffer, format);
+        setConvertedBlob(blob);
+        const url = URL.createObjectURL(blob);
+        if (convertedUrl) URL.revokeObjectURL(convertedUrl);
+        setConvertedUrl(url);
+      } catch (err) {
+        console.error('Conversion error:', err);
+      } finally {
+        setIsConverting(false);
+      }
+    };
+
+    doConvert();
+  }, [audioBuffer, format]);
 
   // Start recording
   const startRecording = useCallback(async () => {
@@ -49,8 +95,11 @@ export default function VoiceRecorder() {
       const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
 
-      // Set up MediaRecorder
-      const mediaRecorder = new MediaRecorder(stream);
+      // Set up MediaRecorder - record in webm for best compatibility, convert later
+      const mimeType = 'audio/webm;codecs=opus';
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'audio/webm',
+      });
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
 
@@ -66,7 +115,7 @@ export default function VoiceRecorder() {
         const url = URL.createObjectURL(blob);
         setAudioUrl(url);
 
-        // Decode audio for waveform
+        // Decode audio for waveform and conversion
         try {
           const arrayBuffer = await blob.arrayBuffer();
           const decodedBuffer = await audioContext.decodeAudioData(arrayBuffer);
@@ -144,7 +193,6 @@ export default function VoiceRecorder() {
 
     audio.onplay = () => {
       setIsPlaying(true);
-      // Set start time based on trim
       audio.currentTime = trimStart * duration;
     };
 
@@ -155,7 +203,6 @@ export default function VoiceRecorder() {
 
     audio.ontimeupdate = () => {
       setCurrentTime(audio.currentTime);
-      // Stop at trim end
       if (audio.currentTime >= trimEnd * duration) {
         audio.pause();
         setIsPlaying(false);
@@ -184,34 +231,61 @@ export default function VoiceRecorder() {
     }
   }, []);
 
-  // Download audio
+  // Download audio in selected format
   const downloadAudio = useCallback(() => {
-    if (!audioBlob) return;
+    const blob = convertedBlob || audioBlob;
+    const url = convertedUrl || audioUrl;
+    if (!blob || !url) return;
+
+    const formatInfo = FORMAT_OPTIONS.find(f => f.value === format);
+    const extension = formatInfo?.extension || 'webm';
 
     const link = document.createElement('a');
-    link.href = audioUrl || '';
-    link.download = `recording-${Date.now()}.${format === 'webm' ? 'webm' : format}`;
+    link.href = url;
+    link.download = `recording-${Date.now()}.${extension}`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-  }, [audioBlob, audioUrl, format]);
+  }, [audioBlob, audioUrl, convertedBlob, convertedUrl, format]);
+
+  // Share audio
+  const shareAudio = useCallback(async () => {
+    const blob = convertedBlob || audioBlob;
+    if (!blob) return;
+
+    const formatInfo = FORMAT_OPTIONS.find(f => f.value === format);
+    const extension = formatInfo?.extension || 'webm';
+    const filename = `recording-${Date.now()}.${extension}`;
+
+    setIsSharing(true);
+    try {
+      await shareFile(blob, filename);
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        setError(err.message || 'Sharing failed. Try downloading instead.');
+      }
+    } finally {
+      setIsSharing(false);
+    }
+  }, [audioBlob, convertedBlob, format]);
 
   // Reset recorder
   const resetRecorder = useCallback(() => {
     stopAudio();
-    if (audioUrl) {
-      URL.revokeObjectURL(audioUrl);
-    }
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    if (convertedUrl) URL.revokeObjectURL(convertedUrl);
     setAudioBlob(null);
     setAudioUrl(null);
     setAudioBuffer(null);
+    setConvertedBlob(null);
+    setConvertedUrl(null);
     setRecordingTime(0);
     setCurrentTime(0);
     setDuration(0);
     setTrimStart(0);
     setTrimEnd(1);
     setError(null);
-  }, [audioUrl, stopAudio]);
+  }, [audioUrl, convertedUrl, stopAudio]);
 
   // Cleanup
   useEffect(() => {
@@ -223,12 +297,13 @@ export default function VoiceRecorder() {
       if (audioContextRef.current) {
         audioContextRef.current.close();
       }
-      if (audioUrl) {
-        URL.revokeObjectURL(audioUrl);
-      }
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      if (convertedUrl) URL.revokeObjectURL(convertedUrl);
       cancelAnimationFrame(animationRef.current);
     };
   }, []);
+
+  const currentFormatInfo = FORMAT_OPTIONS.find(f => f.value === format);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-indigo-950 to-gray-900 flex flex-col items-center justify-center p-4">
@@ -240,7 +315,7 @@ export default function VoiceRecorder() {
           </span>
         </h1>
         <p className="text-gray-400 text-lg">
-          Record your voice directly in the browser. No installation needed.
+          Record, trim, convert & share your voice — all in your browser.
         </p>
       </div>
 
@@ -249,7 +324,15 @@ export default function VoiceRecorder() {
         {/* Error Message */}
         {error && (
           <div className="mb-6 p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-center">
-            {error}
+            <div className="flex items-center justify-center gap-2">
+              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+              </svg>
+              {error}
+            </div>
+            <button onClick={() => setError(null)} className="mt-2 text-xs text-red-300 hover:text-red-200 underline">
+              Dismiss
+            </button>
           </div>
         )}
 
@@ -291,21 +374,19 @@ export default function VoiceRecorder() {
         <div className="flex items-center justify-center gap-4 mb-6">
           {!audioBuffer ? (
             <>
-              {/* Start/Stop Recording Button */}
               {!isRecording ? (
                 <button
                   onClick={startRecording}
-                  className="w-20 h-20 bg-gradient-to-br from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 rounded-full flex items-center justify-center shadow-lg shadow-red-500/30 transition-all duration-200 hover:scale-105 active:scale-95"
+                  className="w-20 h-20 bg-gradient-to-br from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 rounded-full flex items-center justify-center shadow-lg shadow-red-500/30 transition-all duration-200 hover:scale-105 active:scale-95 group"
                   title="Start Recording"
                 >
-                  <svg className="w-8 h-8 text-white" fill="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-8 h-8 text-white group-hover:scale-110 transition-transform" fill="currentColor" viewBox="0 0 24 24">
                     <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
                     <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
                   </svg>
                 </button>
               ) : (
                 <>
-                  {/* Pause/Resume Button */}
                   <button
                     onClick={togglePause}
                     className="w-14 h-14 bg-gradient-to-br from-yellow-500 to-yellow-600 hover:from-yellow-600 hover:to-yellow-700 rounded-full flex items-center justify-center shadow-lg shadow-yellow-500/30 transition-all duration-200 hover:scale-105 active:scale-95"
@@ -322,7 +403,6 @@ export default function VoiceRecorder() {
                     )}
                   </button>
 
-                  {/* Stop Button */}
                   <button
                     onClick={stopRecording}
                     className="w-20 h-20 bg-gradient-to-br from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 rounded-full flex items-center justify-center shadow-lg shadow-red-500/30 transition-all duration-200 hover:scale-105 active:scale-95"
@@ -337,7 +417,6 @@ export default function VoiceRecorder() {
             </>
           ) : (
             <>
-              {/* Playback Controls */}
               {!isPlaying ? (
                 <button
                   onClick={playAudio}
@@ -412,31 +491,86 @@ export default function VoiceRecorder() {
               </div>
             </div>
 
-            {/* Format & Download */}
+            {/* Format Selection */}
+            <div className="bg-gray-700/30 rounded-xl p-4">
+              <h3 className="text-white font-medium mb-3 flex items-center gap-2">
+                <svg className="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+                </svg>
+                Output Format
+              </h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {FORMAT_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => setFormat(opt.value)}
+                    className={`px-4 py-2.5 rounded-lg font-medium text-sm transition-all duration-200 ${
+                      format === opt.value
+                        ? 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/20'
+                        : 'bg-gray-600/50 text-gray-300 hover:bg-gray-600 hover:text-white'
+                    }`}
+                  >
+                    <span className="block text-base font-bold">{opt.label}</span>
+                    <span className="block text-xs opacity-70">.{opt.extension}</span>
+                  </button>
+                ))}
+              </div>
+              {isConverting && (
+                <div className="mt-3 flex items-center gap-2 text-indigo-400 text-sm">
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Converting to {currentFormatInfo?.label}...
+                </div>
+              )}
+            </div>
+
+            {/* Download & Share Buttons */}
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <label className="text-gray-400 text-sm">Format:</label>
-                <select
-                  value={format}
-                  onChange={(e) => setFormat(e.target.value as 'webm' | 'mp3' | 'wav')}
-                  className="bg-gray-700 text-white rounded-lg px-3 py-2 border border-gray-600 focus:outline-none focus:border-indigo-500"
-                >
-                  <option value="webm">WebM</option>
-                  <option value="wav">WAV</option>
-                </select>
+              <div className="text-gray-400 text-sm">
+                {convertedBlob && (
+                  <span>
+                    File size: <span className="text-white font-medium">{(convertedBlob.size / 1024).toFixed(1)} KB</span>
+                  </span>
+                )}
               </div>
 
-              <div className="flex gap-3">
+              <div className="flex flex-wrap gap-3">
+                {/* Download Button */}
                 <button
                   onClick={downloadAudio}
-                  className="px-6 py-3 bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white font-medium rounded-lg shadow-lg shadow-indigo-500/30 transition-all duration-200 hover:scale-105 active:scale-95 flex items-center gap-2"
+                  disabled={isConverting}
+                  className="px-6 py-3 bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed text-white font-medium rounded-lg shadow-lg shadow-indigo-500/30 transition-all duration-200 hover:scale-105 active:scale-95 flex items-center gap-2"
                 >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                   </svg>
-                  Download
+                  Download {currentFormatInfo?.label}
                 </button>
 
+                {/* Share Button */}
+                {shareSupported && (
+                  <button
+                    onClick={shareAudio}
+                    disabled={isConverting || isSharing}
+                    className="px-6 py-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed text-white font-medium rounded-lg shadow-lg shadow-emerald-500/30 transition-all duration-200 hover:scale-105 active:scale-95 flex items-center gap-2"
+                  >
+                    {isSharing ? (
+                      <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+                      </svg>
+                    )}
+                    Share
+                  </button>
+                )}
+
+                {/* New Recording Button */}
                 <button
                   onClick={resetRecorder}
                   className="px-6 py-3 bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800 text-white font-medium rounded-lg shadow-lg transition-all duration-200 hover:scale-105 active:scale-95 flex items-center gap-2"
@@ -444,7 +578,7 @@ export default function VoiceRecorder() {
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                   </svg>
-                  New Recording
+                  New
                 </button>
               </div>
             </div>
@@ -453,27 +587,33 @@ export default function VoiceRecorder() {
       </div>
 
       {/* Features Section */}
-      <div className="w-full max-w-3xl mt-8 grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="w-full max-w-3xl mt-8 grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="bg-gray-800/30 backdrop-blur-sm rounded-xl p-4 border border-gray-700/30 text-center">
           <div className="text-3xl mb-2">🔒</div>
-          <h3 className="text-white font-medium mb-1">Private & Secure</h3>
-          <p className="text-gray-400 text-sm">All recordings stay in your browser. Nothing is uploaded.</p>
-        </div>
-        <div className="bg-gray-800/30 backdrop-blur-sm rounded-xl p-4 border border-gray-700/30 text-center">
-          <div className="text-3xl mb-2">⚡</div>
-          <h3 className="text-white font-medium mb-1">No Installation</h3>
-          <p className="text-gray-400 text-sm">Works directly in your browser. No plugins needed.</p>
+          <h3 className="text-white font-medium mb-1">Private</h3>
+          <p className="text-gray-400 text-xs">All recordings stay in your browser.</p>
         </div>
         <div className="bg-gray-800/30 backdrop-blur-sm rounded-xl p-4 border border-gray-700/30 text-center">
           <div className="text-3xl mb-2">🎵</div>
-          <h3 className="text-white font-medium mb-1">Easy to Use</h3>
-          <p className="text-gray-400 text-sm">Record, trim, and download in seconds.</p>
+          <h3 className="text-white font-medium mb-1">Multi-Format</h3>
+          <p className="text-gray-400 text-xs">Export as MP3, WAV, WebM or OGG.</p>
+        </div>
+        <div className="bg-gray-800/30 backdrop-blur-sm rounded-xl p-4 border border-gray-700/30 text-center">
+          <div className="text-3xl mb-2">📤</div>
+          <h3 className="text-white font-medium mb-1">Share</h3>
+          <p className="text-gray-400 text-xs">Share directly via your device.</p>
+        </div>
+        <div className="bg-gray-800/30 backdrop-blur-sm rounded-xl p-4 border border-gray-700/30 text-center">
+          <div className="text-3xl mb-2">⚡</div>
+          <h3 className="text-white font-medium mb-1">No Install</h3>
+          <p className="text-gray-400 text-xs">Works directly in your browser.</p>
         </div>
       </div>
 
       {/* Footer */}
       <div className="mt-8 text-center text-gray-500 text-sm">
         <p>Works best in Chrome, Firefox, and Edge. Requires microphone permission.</p>
+        <p className="mt-1">Share feature available on mobile devices with native sharing support.</p>
       </div>
     </div>
   );
