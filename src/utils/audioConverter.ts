@@ -1,12 +1,26 @@
 // Audio format conversion utilities
 
 export type AudioFormat = 'webm' | 'mp3' | 'wav' | 'ogg';
+export type BitDepth = 8 | 16 | 24 | 32;
+export type BitRate = 64 | 96 | 128 | 192 | 256 | 320;
 
 export interface FormatOption {
   value: AudioFormat;
   label: string;
   mimeType: string;
   extension: string;
+}
+
+export interface BitDepthOption {
+  value: BitDepth;
+  label: string;
+  description: string;
+}
+
+export interface BitRateOption {
+  value: BitRate;
+  label: string;
+  description: string;
 }
 
 export const FORMAT_OPTIONS: FormatOption[] = [
@@ -16,15 +30,34 @@ export const FORMAT_OPTIONS: FormatOption[] = [
   { value: 'ogg', label: 'OGG', mimeType: 'audio/ogg', extension: 'ogg' },
 ];
 
-// Encode AudioBuffer to WAV format
-export function encodeWAV(audioBuffer: AudioBuffer): Blob {
+export const BIT_DEPTH_OPTIONS: BitDepthOption[] = [
+  { value: 8, label: '8-bit', description: 'Low quality, small size' },
+  { value: 16, label: '16-bit', description: 'Standard quality (CD)' },
+  { value: 24, label: '24-bit', description: 'High quality (Studio)' },
+  { value: 32, label: '32-bit', description: 'Maximum quality' },
+];
+
+export const BIT_RATE_OPTIONS: BitRateOption[] = [
+  { value: 64, label: '64 kbps', description: 'Voice/Low quality' },
+  { value: 96, label: '96 kbps', description: 'Speech/Mobile' },
+  { value: 128, label: '128 kbps', description: 'Standard (Default)' },
+  { value: 192, label: '192 kbps', description: 'Good quality' },
+  { value: 256, label: '256 kbps', description: 'High quality' },
+  { value: 320, label: '320 kbps', description: 'Maximum quality' },
+];
+
+export const DEFAULT_BIT_RATE: BitRate = 128;
+export const DEFAULT_BIT_DEPTH: BitDepth = 16;
+
+// Encode AudioBuffer to WAV format with configurable bit depth
+export function encodeWAV(audioBuffer: AudioBuffer, bitDepth: BitDepth = 16): Blob {
   const numChannels = audioBuffer.numberOfChannels;
   const sampleRate = audioBuffer.sampleRate;
   const format = 1; // PCM
-  const bitDepth = 16;
 
   const samples = interleave(audioBuffer);
-  const dataLength = samples.length * (bitDepth / 8);
+  const bytesPerSample = bitDepth / 8;
+  const dataLength = samples.length * bytesPerSample;
   const buffer = new ArrayBuffer(44 + dataLength);
   const view = new DataView(buffer);
 
@@ -39,21 +72,44 @@ export function encodeWAV(audioBuffer: AudioBuffer): Blob {
   view.setUint16(20, format, true);
   view.setUint16(22, numChannels, true);
   view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * numChannels * (bitDepth / 8), true);
-  view.setUint16(32, numChannels * (bitDepth / 8), true);
+  view.setUint32(28, sampleRate * numChannels * bytesPerSample, true);
+  view.setUint16(32, numChannels * bytesPerSample, true);
   view.setUint16(34, bitDepth, true);
 
   // data chunk
   writeString(view, 36, 'data');
   view.setUint32(40, dataLength, true);
 
-  // Write samples
+  // Write samples based on bit depth
   let offset = 44;
   for (let i = 0; i < samples.length; i++) {
     const sample = Math.max(-1, Math.min(1, samples[i]));
-    const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-    view.setInt16(offset, intSample, true);
-    offset += 2;
+    
+    if (bitDepth === 8) {
+      // 8-bit is unsigned
+      const intSample = Math.floor((sample + 1) * 127.5);
+      view.setUint8(offset, intSample);
+      offset += 1;
+    } else if (bitDepth === 16) {
+      const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      view.setInt16(offset, intSample, true);
+      offset += 2;
+    } else if (bitDepth === 24) {
+      const intSample = sample < 0 ? sample * 0x800000 : sample * 0x7FFFFF;
+      const bytes = [
+        intSample & 0xFF,
+        (intSample >> 8) & 0xFF,
+        (intSample >> 16) & 0xFF,
+      ];
+      view.setUint8(offset, bytes[0]);
+      view.setUint8(offset + 1, bytes[1]);
+      view.setUint8(offset + 2, bytes[2]);
+      offset += 3;
+    } else if (bitDepth === 32) {
+      const intSample = sample < 0 ? sample * 0x80000000 : sample * 0x7FFFFFFF;
+      view.setInt32(offset, intSample, true);
+      offset += 4;
+    }
   }
 
   return new Blob([buffer], { type: 'audio/wav' });
@@ -85,13 +141,13 @@ function writeString(view: DataView, offset: number, string: string) {
   }
 }
 
-// Encode AudioBuffer to MP3 format using lamejs
-export async function encodeMP3(audioBuffer: AudioBuffer, kbps: number = 128): Promise<Blob> {
+// Encode AudioBuffer to MP3 format using lamejs with configurable bit rate
+export async function encodeMP3(audioBuffer: AudioBuffer, bitRate: BitRate = 128): Promise<Blob> {
   const lamejs = await import('lamejs');
 
   const numChannels = audioBuffer.numberOfChannels;
   const sampleRate = audioBuffer.sampleRate;
-  const mp3encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, kbps);
+  const mp3encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, bitRate);
 
   const samples = audioBuffer.getChannelData(0);
   const sampleBlockSize = 1152;
@@ -164,16 +220,22 @@ export function getMediaRecorderMimeType(format: AudioFormat): string {
   }
 }
 
-// Convert audio buffer to desired format
+// Convert audio buffer to desired format with quality options
 export async function convertAudio(
   audioBuffer: AudioBuffer,
-  format: AudioFormat
+  format: AudioFormat,
+  options: {
+    bitDepth?: BitDepth;
+    bitRate?: BitRate;
+  } = {}
 ): Promise<Blob> {
+  const { bitDepth = DEFAULT_BIT_DEPTH, bitRate = DEFAULT_BIT_RATE } = options;
+
   switch (format) {
     case 'wav':
-      return encodeWAV(audioBuffer);
+      return encodeWAV(audioBuffer, bitDepth);
     case 'mp3':
-      return encodeMP3(audioBuffer);
+      return encodeMP3(audioBuffer, bitRate);
     case 'webm':
     case 'ogg':
     default:
