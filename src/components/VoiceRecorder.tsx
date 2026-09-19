@@ -7,6 +7,7 @@ import {
   canShareFiles,
   shareFile,
 } from '../utils/audioConverter';
+import { autoTrimSilence, getSilenceRegions } from '../utils/vad';
 
 export default function VoiceRecorder() {
   const [isRecording, setIsRecording] = useState(false);
@@ -27,6 +28,11 @@ export default function VoiceRecorder() {
   const [shareSupported, setShareSupported] = useState(false);
   const [convertedBlob, setConvertedBlob] = useState<Blob | null>(null);
   const [convertedUrl, setConvertedUrl] = useState<string | null>(null);
+  
+  // VAD (Voice Activity Detection) states
+  const [silenceThreshold, setSilenceThreshold] = useState(0.02);
+  const [silenceRegions, setSilenceRegions] = useState<Array<{ start: number; end: number }>>([]);
+  const [isAutoTrimming, setIsAutoTrimming] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -269,6 +275,37 @@ export default function VoiceRecorder() {
     }
   }, [audioBlob, convertedBlob, format]);
 
+  // Auto-trim silence using VAD
+  const autoTrimSilenceHandler = useCallback(() => {
+    if (!audioBuffer) return;
+
+    setIsAutoTrimming(true);
+    
+    try {
+      // Detect silence regions
+      const regions = getSilenceRegions(audioBuffer, {
+        silenceThreshold,
+        minSilenceDuration: 0.3,
+      });
+      setSilenceRegions(regions);
+
+      // Auto-trim based on voice activity
+      const { startTrim, endTrim } = autoTrimSilence(audioBuffer, {
+        silenceThreshold,
+        minSilenceDuration: 0.3,
+      });
+
+      // Apply trim values
+      setTrimStart(startTrim);
+      setTrimEnd(endTrim);
+    } catch (err) {
+      console.error('Auto-trim error:', err);
+      setError('Failed to detect silence. Try adjusting the threshold.');
+    } finally {
+      setIsAutoTrimming(false);
+    }
+  }, [audioBuffer, silenceThreshold]);
+
   // Reset recorder
   const resetRecorder = useCallback(() => {
     stopAudio();
@@ -285,6 +322,7 @@ export default function VoiceRecorder() {
     setTrimStart(0);
     setTrimEnd(1);
     setError(null);
+    setSilenceRegions([]);
   }, [audioUrl, convertedUrl, stopAudio]);
 
   // Cleanup
@@ -367,6 +405,7 @@ export default function VoiceRecorder() {
             duration={duration}
             trimStart={trimStart}
             trimEnd={trimEnd}
+            silenceRegions={silenceRegions}
           />
         </div>
 
@@ -491,6 +530,64 @@ export default function VoiceRecorder() {
               </div>
             </div>
 
+            {/* Auto-Silence Trimmer (VAD) */}
+            <div className="bg-gray-700/30 rounded-xl p-4">
+              <h3 className="text-white font-medium mb-3 flex items-center gap-2">
+                <svg className="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+                Auto-Silence Trimmer (VAD)
+              </h3>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-gray-400 text-sm mb-1 flex items-center justify-between">
+                    <span>Silence Threshold</span>
+                    <span className="text-white font-medium">{(silenceThreshold * 100).toFixed(1)}%</span>
+                  </label>
+                  <input
+                    type="range"
+                    min="0.005"
+                    max="0.1"
+                    step="0.005"
+                    value={silenceThreshold}
+                    onChange={(e) => setSilenceThreshold(parseFloat(e.target.value))}
+                    className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-red-500"
+                  />
+                  <p className="text-gray-500 text-xs mt-1">
+                    Lower = more sensitive (detects quieter sounds), Higher = less sensitive
+                  </p>
+                </div>
+                <button
+                  onClick={autoTrimSilenceHandler}
+                  disabled={isAutoTrimming}
+                  className="w-full px-4 py-2.5 bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed text-white font-medium rounded-lg shadow-lg shadow-red-500/30 transition-all duration-200 hover:scale-105 active:scale-95 flex items-center justify-center gap-2"
+                >
+                  {isAutoTrimming ? (
+                    <>
+                      <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Detecting Silence...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                      </svg>
+                      Auto-Trim Silence
+                    </>
+                  )}
+                </button>
+                {silenceRegions.length > 0 && (
+                  <div className="text-gray-400 text-sm bg-gray-800/50 rounded-lg p-2">
+                    <span className="text-green-400 font-medium">✓ Detected {silenceRegions.length} silence region{silenceRegions.length > 1 ? 's' : ''}</span>
+                    <span className="text-gray-500"> • Red areas in waveform show detected silence</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
             {/* Format Selection */}
             <div className="bg-gray-700/30 rounded-xl p-4">
               <h3 className="text-white font-medium mb-3 flex items-center gap-2">
@@ -587,7 +684,7 @@ export default function VoiceRecorder() {
       </div>
 
       {/* Features Section */}
-      <div className="w-full max-w-3xl mt-8 grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="w-full max-w-3xl mt-8 grid grid-cols-2 md:grid-cols-5 gap-4">
         <div className="bg-gray-800/30 backdrop-blur-sm rounded-xl p-4 border border-gray-700/30 text-center">
           <div className="text-3xl mb-2">🔒</div>
           <h3 className="text-white font-medium mb-1">Private</h3>
@@ -597,6 +694,11 @@ export default function VoiceRecorder() {
           <div className="text-3xl mb-2">🎵</div>
           <h3 className="text-white font-medium mb-1">Multi-Format</h3>
           <p className="text-gray-400 text-xs">Export as MP3, WAV, WebM or OGG.</p>
+        </div>
+        <div className="bg-gray-800/30 backdrop-blur-sm rounded-xl p-4 border border-gray-700/30 text-center">
+          <div className="text-3xl mb-2">🔇</div>
+          <h3 className="text-white font-medium mb-1">Auto VAD</h3>
+          <p className="text-gray-400 text-xs">Auto-trim silence with voice detection.</p>
         </div>
         <div className="bg-gray-800/30 backdrop-blur-sm rounded-xl p-4 border border-gray-700/30 text-center">
           <div className="text-3xl mb-2">📤</div>

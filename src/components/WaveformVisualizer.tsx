@@ -10,6 +10,7 @@ interface WaveformVisualizerProps {
   duration: number;
   trimStart: number;
   trimEnd: number;
+  silenceRegions?: Array<{ start: number; end: number }>;
 }
 
 export default function WaveformVisualizer({
@@ -22,6 +23,7 @@ export default function WaveformVisualizer({
   duration,
   trimStart,
   trimEnd,
+  silenceRegions = [],
 }: WaveformVisualizerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>(0);
@@ -136,6 +138,17 @@ export default function WaveformVisualizer({
 
         ctx.setLineDash([]);
 
+        // Draw silence regions
+        if (silenceRegions.length > 0) {
+          ctx.fillStyle = 'rgba(239, 68, 68, 0.2)'; // Semi-transparent red
+          for (const region of silenceRegions) {
+            const regionStartX = (region.start / duration) * width;
+            const regionEndX = (region.end / duration) * width;
+            const regionWidth = regionEndX - regionStartX;
+            ctx.fillRect(regionStartX, 0, regionWidth, height);
+          }
+        }
+
         // Draw playback position
         if (isPlaying && duration > 0) {
           const progressPosPlay = currentTime / duration;
@@ -165,7 +178,7 @@ export default function WaveformVisualizer({
     return () => {
       cancelAnimationFrame(animationRef.current);
     };
-  }, [analyser, isRecording, isPlaying, audioContext, audioBuffer, currentTime, duration, trimStart, trimEnd]);
+  }, [analyser, isRecording, isPlaying, audioContext, audioBuffer, currentTime, duration, trimStart, trimEnd, silenceRegions]);
 
   return (
     <canvas
