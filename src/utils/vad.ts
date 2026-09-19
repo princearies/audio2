@@ -207,3 +207,84 @@ export function getSilenceRegions(
   
   return regions;
 }
+
+/**
+ * Actually cut/remove silence from audio buffer
+ * Returns a new AudioBuffer with silence removed
+ */
+export function cutSilenceFromBuffer(
+  audioBuffer: AudioBuffer,
+  options: Partial<VADOptions> = {}
+): AudioBuffer {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  const numChannels = audioBuffer.numberOfChannels;
+  const sampleRate = audioBuffer.sampleRate;
+  const duration = audioBuffer.duration;
+  
+  // Get all silence regions
+  const silenceRegions = getSilenceRegions(audioBuffer, opts);
+  
+  // If no silence found, return original buffer
+  if (silenceRegions.length === 0) {
+    return audioBuffer;
+  }
+  
+  // Calculate voice regions (non-silence parts)
+  const voiceRegions: Array<{ start: number; end: number }> = [];
+  let currentTime = 0;
+  
+  for (const silence of silenceRegions) {
+    if (silence.start > currentTime) {
+      voiceRegions.push({
+        start: currentTime,
+        end: silence.start,
+      });
+    }
+    currentTime = silence.end;
+  }
+  
+  // Add remaining voice after last silence
+  if (currentTime < duration) {
+    voiceRegions.push({
+      start: currentTime,
+      end: duration,
+    });
+  }
+  
+  // If no voice regions, return original
+  if (voiceRegions.length === 0) {
+    return audioBuffer;
+  }
+  
+  // Calculate total voice duration
+  const totalVoiceDuration = voiceRegions.reduce((sum, region) => sum + (region.end - region.start), 0);
+  const totalVoiceSamples = Math.floor(totalVoiceDuration * sampleRate);
+  
+  // Create new AudioBuffer
+  const newBuffer = new AudioContext().createBuffer(
+    numChannels,
+    totalVoiceSamples,
+    sampleRate
+  );
+  
+  // Copy voice regions to new buffer
+  let writeOffset = 0;
+  for (const region of voiceRegions) {
+    const startSample = Math.floor(region.start * sampleRate);
+    const endSample = Math.floor(region.end * sampleRate);
+    const regionLength = endSample - startSample;
+    
+    for (let channel = 0; channel < numChannels; channel++) {
+      const sourceData = audioBuffer.getChannelData(channel);
+      const targetData = newBuffer.getChannelData(channel);
+      
+      for (let i = 0; i < regionLength; i++) {
+        targetData[writeOffset + i] = sourceData[startSample + i];
+      }
+    }
+    
+    writeOffset += regionLength;
+  }
+  
+  return newBuffer;
+}
